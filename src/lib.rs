@@ -3,6 +3,9 @@ use near_sdk::{AccountId, Balance, env, near_bindgen, BorshStorageKey, StorageUs
 use near_sdk::json_types::{ValidAccountId};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 
+pub const ERR11_INSUFFICIENT_STORAGE: &str = "E11: insufficient $NEAR storage deposit";
+
+
 const U128_STORAGE: StorageUsage = 16;
 const U64_STORAGE: StorageUsage = 8;
 const U32_STORAGE: StorageUsage = 4;
@@ -13,7 +16,6 @@ const ACC_ID_AS_KEY_STORAGE: StorageUsage = ACC_ID_STORAGE + 4;
 const KEY_PREFIX_ACC: StorageUsage = 64;
 /// As a near_sdk::collection key, 1 byte for prefiex
 const ACC_ID_AS_CLT_KEY_STORAGE: StorageUsage = ACC_ID_AS_KEY_STORAGE + 1;
-pub const ERR11_INSUFFICIENT_STORAGE: &str = "E11: insufficient $NEAR storage deposit";
 
 // ACC_ID: the Contract accounts map key length
 // + VAccount enum: 1 byte
@@ -81,6 +83,8 @@ impl Account {
         );
     }
 }
+
+
 #[near_bindgen]
 pub struct Contract {
     owner_id: AccountId,
@@ -100,7 +104,7 @@ impl Contract {
 }
 
 impl Contract {
-    pub fn internal_save_account(&mut self, account_id: &AccountId, account: Account) {
+    pub(crate) fn internal_save_account(&mut self, account_id: &AccountId, account: Account) {
         account.assert_storage_usage();
         self.accounts.insert(&account_id, &account.into());
     }
@@ -114,4 +118,6 @@ impl Contract {
         self.internal_get_account(account_id)
             .expect("ACCOUNT NOT REGISTERED")
     }
+
+    
 }
