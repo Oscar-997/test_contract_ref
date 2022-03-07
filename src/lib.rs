@@ -1,5 +1,7 @@
 use near_sdk::collections::{ UnorderedMap, LookupMap};
-use near_sdk::{AccountId, Balance, env, near_bindgen, BorshStorageKey, StorageUsage };
+use near_sdk::{AccountId, Balance, env, near_bindgen,
+     BorshStorageKey, StorageUsage, log, Promise, Gas
+     };
 use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_contract_standards::storage_management::{
@@ -8,6 +10,8 @@ use near_contract_standards::storage_management::{
 
 mod storage_impl;
 
+pub const GAS_FOR_FT_TRANSFER: Gas = 20_000_000_000_000;
+pub const GAS_FOR_RESOLVE_TRANSFER: Gas = 20_000_000_000_000;
 
 pub const ERR11_INSUFFICIENT_STORAGE: &str = "E11: insufficient $NEAR storage deposit";
 pub const ERR24_NON_ZERO_TOKEN_BALANCE: &str = "E24: non-zero token balance";
@@ -27,11 +31,10 @@ const ACC_ID_AS_CLT_KEY_STORAGE: StorageUsage = ACC_ID_AS_KEY_STORAGE + 1;
 // ACC_ID: the Contract accounts map key length
 // + VAccount enum: 1 byte
 // + U128_STORAGE: near_amount storage
-// + U32_STORAGE: legacy_tokens HashMap length
 // + U32_STORAGE: tokens HashMap length
 // + U64_STORAGE: storage_used
 pub const INIT_ACCOUNT_STORAGE: StorageUsage =
-    ACC_ID_AS_CLT_KEY_STORAGE + 1 + U128_STORAGE + U32_STORAGE + U32_STORAGE + U64_STORAGE;
+    ACC_ID_AS_CLT_KEY_STORAGE + 1 + U128_STORAGE + U32_STORAGE + U64_STORAGE;
 
 
 #[derive(BorshStorageKey, BorshSerialize)]
@@ -44,6 +47,16 @@ pub(crate) enum StorageKey {
 pub struct Account {
     pub near_amount: Balance,
     pub tokens : UnorderedMap<AccountId, Balance>
+}
+
+impl Default for Contract {
+    fn default() -> Self {
+        env::panic(b"Must initilize contract before using");
+        Self {
+            owner_id: env::predecessor_account_id(),
+            accounts: LookupMap::new(StorageKey::Accounts),
+        }
+    }
 }
 
 impl Account {
@@ -95,9 +108,24 @@ impl Account {
             ERR11_INSUFFICIENT_STORAGE
         );
     }
+
+    /// Returns minimal account deposit storage usage possible.
+    pub fn min_storage_usage() -> Balance {
+        INIT_ACCOUNT_STORAGE as Balance * env::storage_byte_cost()
+    }
+
+    // 
+    pub fn storage_available(&self) -> Balance {
+        let locked = self.storage_usage();
+        if self.near_amount > locked {
+            self.near_amount - locked
+        } else {
+            0
+        }
+    }
 }
 
-
+#[derive(BorshDeserialize, BorshSerialize)]
 #[near_bindgen]
 pub struct Contract {
     owner_id: AccountId,
@@ -134,7 +162,7 @@ impl Contract {
 }
 
 impl Contract {
-    pub(crate) fn internal_save_account(&mut self, account_id: &AccountId, account: Account) {
+    pub fn internal_save_account(&mut self, account_id: &AccountId, account: Account) {
         account.assert_storage_usage();
         self.accounts.insert(&account_id, &account.into());
     }
@@ -147,5 +175,93 @@ impl Contract {
     pub fn internal_unwrap_account(&self, account_id: &AccountId) -> Account {
         self.internal_get_account(account_id)
             .expect("ACCOUNT NOT REGISTERED")
+    }
+
+    pub fn internal_register_account(&mut self, account_id: &AccountId, amount: Balance) {
+        let mut account = self.internal_unwrap_or_default_account(&account_id);
+        account.near_amount += amount;
+        self.internal_save_account(&account_id, account);
+    }
+
+    pub fn internal_unwrap_or_default_account (&self, account_id: &AccountId) -> Account {
+        self.internal_get_account(account_id)
+            .unwrap_or_else(|| Account::new(account_id))
+    }
+
+    pub fn internal_storage_withdraw(&mut self, account_id: &AccountId, amount: Balance) -> u128 {
+        let mut account = self.internal_unwrap_account(&account_id);
+        let available = account.storage_available();
+        assert!(available > 0, "Not storage withdraw");
+        let mut withdraw_amount = amount;
+        if amount == 0 {
+            withdraw_amount = available;
+        }
+        assert!(withdraw_amount <= available, "storage withdraw to much");
+        account.near_amount -= withdraw_amount;
+        self.internal_save_account(account_id, account);
+        withdraw_amount
+    }
+
+    pub fn internal_save_information_to_contract(
+        &mut self,
+        account_id: &AccountId,
+        token_id: &AccountId,
+        amount: Balance) {
+            let mut account = self.internal_unwrap_or_default_account(account_id);
+            assert!(account.tokens.get(token_id).is_none(), "Token has already registered!");
+            assert!(amount > 0, "Amount must be greater than 0!" );
+            account.tokens.insert(token_id, &amount);
+            self.internal_save_account(account_id, account);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use near_contract_standards::storage_management::StorageManagement;
+    use near_sdk::test_utils::{accounts, VMContextBuilder};
+    use near_sdk::{testing_env, Balance, MockedBlockchain};
+    use super::*;
+
+    const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
+    
+
+    fn setup_contract() -> (VMContextBuilder, Contract) {
+        let mut context = VMContextBuilder::new();
+        testing_env!(context.predecessor_account_id(accounts(0)).attached_deposit(ONE_NEAR).build());
+        let contract = Contract::new(accounts(0));
+        (context, contract)
+    }
+
+
+    #[test]
+    fn test_deposit_token() {
+        let token_id = accounts(3);
+        let (_, mut contract) = setup_contract();
+        let amount: Balance = 10000;
+        let account_id = accounts(1);
+
+        contract.storage_deposit(Some(account_id), Some(false));
+
+        let  account_id = accounts(1);
+
+        contract.internal_save_information_to_contract(&account_id.to_string(), &token_id.to_string(), amount);
+        assert!(contract.accounts.get(&account_id.to_string()).unwrap().tokens.get(&token_id.to_string()).unwrap() == 10000, "TEST FAILED!!!!")
+    }
+
+    #[test]
+    #[should_panic("ERR_TRANSFER_AMOUNT_EQUAL_ZERO")]
+    fn test_deposit_token_with_zero_amount() {
+        let token_id = accounts(3);
+        let (_, mut contract) = setup_contract();
+        let amount: Balance = 0;
+        let account_id = accounts(1);
+
+        contract.storage_deposit(Some(account_id), Some(false));
+
+        let  account_id = accounts(1);
+
+        contract.internal_save_information_to_contract(&account_id.to_string(), &token_id.to_string(), amount);
+        
     }
 }
