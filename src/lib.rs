@@ -1,9 +1,16 @@
 use near_sdk::collections::{ UnorderedMap, LookupMap};
 use near_sdk::{AccountId, Balance, env, near_bindgen, BorshStorageKey, StorageUsage };
-use near_sdk::json_types::{ValidAccountId};
+use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
+use near_contract_standards::storage_management::{
+    StorageBalance, StorageBalanceBounds, StorageManagement,
+};
+
+mod storage_impl;
+
 
 pub const ERR11_INSUFFICIENT_STORAGE: &str = "E11: insufficient $NEAR storage deposit";
+pub const ERR24_NON_ZERO_TOKEN_BALANCE: &str = "E24: non-zero token balance";
 
 
 const U128_STORAGE: StorageUsage = 16;
@@ -29,6 +36,7 @@ pub const INIT_ACCOUNT_STORAGE: StorageUsage =
 
 #[derive(BorshStorageKey, BorshSerialize)]
 pub(crate) enum StorageKey {
+    Accounts,
     AccountTokens {account_id: AccountId},
 }
 
@@ -65,6 +73,11 @@ impl Account {
         }
     }
 
+    pub fn unregister (&mut self, token_id: &AccountId) {
+        let amount = self.tokens.remove(token_id).unwrap_or_default();
+        assert_eq!(amount, 0, "{}", ERR24_NON_ZERO_TOKEN_BALANCE)
+    }
+
     // [AUDIT_01]
     /// Returns amount of $NEAR necessary to cover storage used by this data structure.
     pub fn storage_usage(&self) -> Balance {
@@ -92,14 +105,31 @@ pub struct Contract {
 }
 
 #[near_bindgen]
-
 impl Contract {
+    #[init]
+    pub fn new(owner_id: ValidAccountId) -> Self {
+        Self {
+            owner_id: owner_id.as_ref().clone(),
+            accounts: LookupMap::new(StorageKey::Accounts)
+        }
+    }
+
     #[payable]
     pub fn register_tokens(&mut self, token_ids: Vec<ValidAccountId>) {
         let sender_id = env::predecessor_account_id();
         let mut account = self.internal_unwrap_account(&sender_id);
         account.register(&token_ids);
         self.internal_save_account(&sender_id, account);
+    }
+
+    #[payable]
+    pub fn unregister_tokens(&mut self, token_ids: Vec<ValidAccountId>) {
+        let sender_id = env::predecessor_account_id();
+        let mut account = self.internal_unwrap_account(&sender_id);
+        for token_id in token_ids {
+            account.unregister(token_id.as_ref())
+        }
+        self.internal_save_account(&sender_id, account)
     }
 }
 
@@ -118,6 +148,4 @@ impl Contract {
         self.internal_get_account(account_id)
             .expect("ACCOUNT NOT REGISTERED")
     }
-
-    
 }
