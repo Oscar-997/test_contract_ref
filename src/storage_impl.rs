@@ -62,8 +62,6 @@ impl StorageManagement for Contract {
         }
     }
 
-
-    // 
     fn storage_balance_bounds(&self) -> StorageBalanceBounds {
         StorageBalanceBounds {
             min: Account::min_storage_usage().into(),

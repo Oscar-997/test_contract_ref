@@ -1,12 +1,15 @@
+use std::collections::HashMap;
+
 use near_sdk::collections::{ UnorderedMap, LookupMap};
 use near_sdk::{AccountId, Balance, env, near_bindgen,
-     BorshStorageKey, StorageUsage, log, Promise, Gas
+     BorshStorageKey, StorageUsage, log, Promise, Gas, PromiseOrValue
      };
 use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
+use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 
 mod storage_impl;
 
@@ -123,6 +126,11 @@ impl Account {
             0
         }
     }
+
+    pub fn get_tokens(&self) -> Vec<AccountId> {
+        let a: Vec<AccountId> = self.tokens.keys().collect();
+        a
+    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize)]
@@ -158,6 +166,34 @@ impl Contract {
             account.unregister(token_id.as_ref())
         }
         self.internal_save_account(&sender_id, account)
+    }
+
+    pub fn get_deposits(&self, account_id: ValidAccountId) -> HashMap<AccountId, U128> {
+        let wrapped_account = self.internal_get_account(account_id.as_ref());
+        if let Some(account) = wrapped_account {
+            account.get_tokens()
+                .iter()
+                .map(|token| (token.clone(), U128(account.get_balance(token).unwrap())))
+                .collect()
+        } else {
+            HashMap::new()
+        }
+    }
+}
+
+#[near_bindgen]
+impl FungibleTokenReceiver for Contract {
+    fn ft_on_transfer(
+        &mut self,
+        sender_id: ValidAccountId,
+        amount: U128,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        let token_id = env::predecessor_account_id();
+        assert!(msg.is_empty(), "msg must empty on deposit action");
+        self.internal_save_information_to_contract(&sender_id.into(), &token_id, amount.into());
+        PromiseOrValue::Value(U128(0))
+        
     }
 }
 
@@ -208,12 +244,37 @@ impl Contract {
         token_id: &AccountId,
         amount: Balance) {
             let mut account = self.internal_unwrap_or_default_account(account_id);
-            assert!(account.tokens.get(token_id).is_none(), "Token has already registered!");
+            let account_amount = account.tokens.get(token_id).unwrap_or_default();
+            // assert!(account.tokens.get(token_id).is_none(), "Token has already registered!");
             assert!(amount > 0, "Amount must be greater than 0!" );
-            account.tokens.insert(token_id, &amount);
+            if amount == 0 {
+                account.tokens.insert(token_id, &amount);
+            }else {
+                account.tokens.insert(token_id, &(amount + account_amount));
+            }
             self.internal_save_account(account_id, account);
     }
+
+    /// Returns balance of the deposit for given user outside of any pools.
+    pub fn get_deposit(&self, account_id: ValidAccountId, token_id: ValidAccountId) -> U128 {
+        self.internal_get_deposit(account_id.as_ref(), token_id.as_ref())
+            .into()
+    }
+
+    pub(crate) fn internal_get_deposit(
+        &self,
+        sender_id: &AccountId,
+        token_id: &AccountId,
+    ) -> Balance {
+        self.internal_get_account(sender_id)
+            .and_then(|x| x.get_balance(token_id))
+            .unwrap_or(0)
+    }
 }
+
+
+
+
 
 #[cfg(test)]
 mod tests {
