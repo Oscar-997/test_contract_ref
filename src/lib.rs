@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use near_sdk::collections::{ UnorderedMap, LookupMap};
+use near_contract_standards::fungible_token::core_impl::ext_fungible_token;
+use near_sdk::collections::{ UnorderedMap, LookupMap, UnorderedSet};
 use near_sdk::{AccountId, Balance, env, near_bindgen,
-     BorshStorageKey, StorageUsage, log, Promise, Gas, PromiseOrValue
+     BorshStorageKey, StorageUsage, log, Promise, Gas, PromiseOrValue, PromiseResult
      };
 use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
@@ -10,7 +11,9 @@ use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
 use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
+use utils::ext_self;
 
+mod utils;
 mod storage_impl;
 
 pub const GAS_FOR_FT_TRANSFER: Gas = 20_000_000_000_000;
@@ -18,7 +21,11 @@ pub const GAS_FOR_RESOLVE_TRANSFER: Gas = 20_000_000_000_000;
 
 pub const ERR11_INSUFFICIENT_STORAGE: &str = "E11: insufficient $NEAR storage deposit";
 pub const ERR24_NON_ZERO_TOKEN_BALANCE: &str = "E24: non-zero token balance";
-
+pub const ERR21_TOKEN_NOT_REG: &str = "E21: token not registered";
+pub const ERR29_ILLEGAL_WITHDRAW_AMOUNT: &str = "E29: Illegal withdraw amount";
+pub const ERR22_NOT_ENOUGH_TOKENS: &str = "E22: not enough tokens in deposit";
+pub const ERR25_CALLBACK_POST_WITHDRAW_INVALID: &str =
+    "E25: expected 1 promise result from withdraw";
 
 const U128_STORAGE: StorageUsage = 16;
 const U64_STORAGE: StorageUsage = 8;
@@ -44,6 +51,7 @@ pub const INIT_ACCOUNT_STORAGE: StorageUsage =
 pub(crate) enum StorageKey {
     Accounts,
     AccountTokens {account_id: AccountId},
+    Whitelist,
 }
 
 #[derive(BorshDeserialize, BorshSerialize)]
@@ -54,10 +62,10 @@ pub struct Account {
 
 impl Default for Contract {
     fn default() -> Self {
-        env::panic(b"Must initilize contract before using");
         Self {
             owner_id: env::predecessor_account_id(),
             accounts: LookupMap::new(StorageKey::Accounts),
+            whitelisted_tokens: UnorderedSet::new(StorageKey::Whitelist),
         }
     }
 }
@@ -131,6 +139,46 @@ impl Account {
         let a: Vec<AccountId> = self.tokens.keys().collect();
         a
     }
+
+    /// Deposit amount to the balance of given token,
+    /// if given token not register and not enough storage, deposit fails 
+    pub(crate) fn deposit_with_storage_check(&mut self, token: &AccountId, amount: Balance) -> bool { 
+        if let Some(balance) = self.tokens.get(token) {
+            // token has been registered, just add without storage check, 
+            let new_balance = balance + amount;
+            self.tokens.insert(token, &new_balance);
+            true
+        } else {
+            // check storage after insert, if fail should unregister the token
+            self.tokens.insert(token, &(amount));
+            if self.storage_usage() <= self.near_amount {
+                true
+            } else {
+                self.tokens.remove(token);
+                false
+            }
+        }
+    }
+
+     /// Deposit amount to the balance of given token.
+     pub(crate) fn deposit(&mut self, token: &AccountId, amount: Balance) {
+        if let Some(x) = self.tokens.get(token) {
+            self.tokens.insert(token, &(amount + x));
+        } else {
+            self.tokens.insert(token, &amount);
+        }
+    }
+
+     /// Withdraw amount of `token` from the internal balance.
+    /// Panics if `amount` is bigger than the current balance.
+    pub(crate) fn withdraw(&mut self, token: &AccountId, amount: Balance) {
+        if let Some(x) = self.tokens.get(token) {
+            assert!(x >= amount, "{}", ERR22_NOT_ENOUGH_TOKENS);
+            self.tokens.insert(token, &(x - amount));
+        } else {
+            env::panic(ERR21_TOKEN_NOT_REG.as_bytes());
+        }
+    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize)]
@@ -138,16 +186,18 @@ impl Account {
 pub struct Contract {
     owner_id: AccountId,
     accounts: LookupMap<AccountId, Account>,
+    whitelisted_tokens: UnorderedSet<AccountId>,
 }
 
 #[near_bindgen]
 impl Contract {
     #[init]
+    #[init]
     pub fn new(owner_id: ValidAccountId) -> Self {
         Self {
-            owner_id: owner_id.as_ref().clone(),
-            accounts: LookupMap::new(StorageKey::Accounts)
-        }
+            owner_id:owner_id.as_ref().clone(),
+            accounts:LookupMap::new(StorageKey::Accounts),
+            whitelisted_tokens: UnorderedSet::new(StorageKey::Whitelist) }
     }
 
     #[payable]
@@ -179,6 +229,91 @@ impl Contract {
             HashMap::new()
         }
     }
+
+    /// Withdraws given token from the deposits of given user.
+    /// a zero amount means to withdraw all in user's inner account.
+    /// Optional unregister will try to remove record of this token from AccountDeposit for given user.
+    /// Unregister will fail if the left over balance is non 0.
+    #[payable]
+    pub fn withdraw(
+        &mut self,
+        token_id: ValidAccountId,
+        amount: U128,
+        unregister: Option<bool>,
+    ) -> Promise {
+        let token_id: AccountId = token_id.into();
+        let sender_id = env::predecessor_account_id();
+        let mut account = self.internal_unwrap_account(&sender_id);
+        
+        // get full amount if amount param is 0
+        let mut amount: u128 = amount.into();
+        if amount == 0 {
+            amount = account.get_balance(&token_id).expect(ERR21_TOKEN_NOT_REG);
+        }
+        assert!(amount > 0, "{}", ERR29_ILLEGAL_WITHDRAW_AMOUNT);
+        
+        // Note: subtraction and deregistration will be reverted if the promise fails.
+        account.withdraw(&token_id, amount);
+        if unregister == Some(true) {
+            account.unregister(&token_id);
+        }
+        self.internal_save_account(&sender_id, account);
+        self.internal_send_tokens(&sender_id, &token_id, amount)
+    }
+
+    #[private]
+    pub fn exchange_callback_post_withdraw(
+        &mut self,
+        token_id: AccountId,
+        sender_id: AccountId,
+        amount: U128,
+    ) {
+        assert_eq!(
+            env::promise_results_count(),
+            1,
+            "{}",
+            ERR25_CALLBACK_POST_WITHDRAW_INVALID
+        );
+        match env::promise_result(0) {
+            PromiseResult::NotReady => unreachable!(),
+            PromiseResult::Successful(_) => {}
+            PromiseResult::Failed => {
+                // This reverts the changes from withdraw function.
+                // If account doesn't exit, deposits to the owner's account as lostfound.
+                let mut failed = false;
+                if let Some(mut account) = self.internal_get_account(&sender_id) {
+                    if account.deposit_with_storage_check(&token_id, amount.0) {
+                        // cause storage already checked, here can directly save
+                        self.accounts.insert(&sender_id, &account.into());
+                    } else {
+                        // we can ensure that internal_get_account here would NOT cause a version upgrade, 
+                        // cause it is callback, the account must be the current version or non-exist,
+                        // so, here we can just leave it without insert, won't cause storage collection inconsistency.
+                        env::log(
+                            format!(
+                                "Account {} has not enough storage. Depositing to owner.",
+                                sender_id
+                            )
+                            .as_bytes(),
+                        );
+                        failed = true;
+                    }
+                } else {
+                    env::log(
+                        format!(
+                            "Account {} is not registered. Depositing to owner.",
+                            sender_id
+                        )
+                        .as_bytes(),
+                    );
+                    failed = true;
+                }
+                if failed {
+                    self.internal_lostfound(&token_id, amount.0);
+                }
+            }
+        };
+    }
 }
 
 #[near_bindgen]
@@ -201,6 +336,19 @@ impl Contract {
     pub fn internal_save_account(&mut self, account_id: &AccountId, account: Account) {
         account.assert_storage_usage();
         self.accounts.insert(&account_id, &account.into());
+    }
+
+    /// save token to owner account as lostfound, no need to care about storage
+    /// only global whitelisted token can be stored in lost-found
+    pub(crate) fn internal_lostfound(&mut self, token_id: &AccountId, amount: u128) {
+        if self.whitelisted_tokens.contains(token_id) {
+            let mut lostfound = self.internal_unwrap_or_default_account(&self.owner_id);
+            lostfound.deposit(token_id, amount);
+            self.accounts.insert(&self.owner_id, &lostfound.into());
+        } else {
+            env::panic("ERR: non-whitelisted token can NOT deposit into lost-found.".as_bytes());
+        }
+        
     }
 
     pub fn internal_get_account(&self, account_id: &AccountId) -> Option<Account> {
@@ -269,6 +417,32 @@ impl Contract {
         self.internal_get_account(sender_id)
             .and_then(|x| x.get_balance(token_id))
             .unwrap_or(0)
+    }
+
+    /// Sends given amount to given user and if it fails, returns it back to user's balance.
+    /// Tokens must already be subtracted from internal balance.
+    pub(crate) fn internal_send_tokens(
+        &self,
+        sender_id: &AccountId,
+        token_id: &AccountId,
+        amount: Balance,
+    ) -> Promise {
+        ext_fungible_token::ft_transfer(
+            sender_id.clone(),
+            U128(amount),
+            None,
+            token_id,
+            1,
+            GAS_FOR_FT_TRANSFER,
+        )
+        .then(ext_self::exchange_callback_post_withdraw(
+            token_id.clone(),
+            sender_id.clone(),
+            U128(amount),
+            &env::current_account_id(),
+            0,
+            GAS_FOR_RESOLVE_TRANSFER,
+        ))
     }
 }
 
