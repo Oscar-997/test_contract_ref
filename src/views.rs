@@ -3,6 +3,9 @@ use near_sdk::{serde::{Serialize, Deserialize}, AccountId, json_types::U128, nea
 use crate::{pool::Pool, utils::SwapVolume};
 use crate::*;
 
+pub const ERR85_NO_POOL: &str = "E85: invalid pool id";
+
+
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "near_sdk::serde")]
@@ -39,6 +42,13 @@ impl From<Pool> for PoolInfo {
 
 #[near_bindgen]
 impl Contract {
+    /// Returns list of pools of given length from given start index
+    pub fn get_pools(&self, from_index: u64, limit: u64) -> Vec<PoolInfo> {
+        (from_index..std::cmp::min(from_index + limit, self.pools.len()))
+            .map(|index| self.get_pool(index))
+            .collect()
+    }
+
     /// Returns information about specified pool.
     pub fn get_pool(&self, pool_id: u64) -> PoolInfo {
         self.pools.get(pool_id).expect("ERR_NO_POOL").into()
@@ -56,5 +66,19 @@ impl Contract {
             .expect("ERR_NO_POOL")
             .share_balances(account_id.as_ref())
             .into()
+    }
+
+    /// Returns total number of shares in the given pool.
+    pub fn get_pool_total_shares(&self, pool_id: u64) -> U128 {
+        self.pools
+            .get(pool_id)
+            .expect(ERR85_NO_POOL)
+            .share_total_balance()
+            .into()
+    }
+
+    /// Returns number of pools 
+    pub fn get_number_of_pools(&self) -> u64 {
+        self.pools.len()
     }
 }

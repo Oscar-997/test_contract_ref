@@ -2,5 +2,6 @@
 set -e
 
 RUSTFLAGS='-C link-arg=-s' cargo +stable build --target wasm32-unknown-unknown --release
-cd ..
-cp target/wasm32-unknown-unknown/release/test-contract.wasm ./res/test-contract.wasm
+
+near deploy beer333.testnet --wasmFile target/wasm32-unknown-unknown/release/test_contract.wasm
+

@@ -121,6 +121,14 @@ impl SimplePool {
                     U256::from(amounts[i]) * U256::from(self.shares_total_supply) / self.amounts[i],
                 );
             }
+            for i in 0..self.token_account_ids.len() {
+                let amount = (U256::from(self.amounts[i]) * fair_supply
+                    / U256::from(self.shares_total_supply))
+                .as_u128();
+                assert!(amount > 0, "{}", ERR31_ZERO_AMOUNT);
+                self.amounts[i] += amount;
+                amounts[i] = amount;
+            }
             fair_supply.as_u128()
         } else {
             for i in 0..self.token_account_ids.len() {

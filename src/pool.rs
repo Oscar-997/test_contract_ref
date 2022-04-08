@@ -63,6 +63,12 @@ impl Pool {
             Pool::SimplePool(pool) => pool.share_balance_of(account_id)
         }
     }
+
+    pub fn share_total_balance(&self) -> Balance {
+        match self {
+            Pool::SimplePool(pool) => pool.share_total_balance()
+        }
+    }
 }
 
 
