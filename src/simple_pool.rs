@@ -13,6 +13,7 @@ const ERR14_LP_ALREADY_REGISTERED: &str = "E14: LP already registered";
 const ERR13_LP_NOT_REGISTERED: &str = "E13: LP not registered";
 const ERR31_ZERO_AMOUNT: &str = "E31: adding zero amount";
 const ERR32_ZERO_SHARES: &str = "E32: minting zero shares";
+pub const INIT_SHARES_SUPPLY: u128 = 1_000_000_000_000_000_000_000_000;
 
 
 
@@ -134,7 +135,8 @@ impl SimplePool {
             for i in 0..self.token_account_ids.len() {
                 self.amounts[i] += amounts[i];
             }
-            integer_sqrt(U256::from(amounts[0]) * U256::from(amounts[1])).as_u128()
+            INIT_SHARES_SUPPLY
+            
         };
         self.mint_shares(&sender_id, shares);
         assert!(shares > 0, "{}", ERR32_ZERO_SHARES);
