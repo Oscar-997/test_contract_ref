@@ -1,6 +1,7 @@
 use near_sdk::{serde::{Serialize, Deserialize}, AccountId, json_types::U128, near_bindgen};
 
 use crate::{pool::Pool, utils::SwapVolume};
+use crate::Account;
 use crate::*;
 
 pub const ERR85_NO_POOL: &str = "E85: invalid pool id";
@@ -80,5 +81,10 @@ impl Contract {
     /// Returns number of pools 
     pub fn get_number_of_pools(&self) -> u64 {
         self.pools.len()
+    }
+
+    pub fn get_token_balance(&self, account_id: AccountId, token_id: AccountId) -> U128 {
+        let account = self.internal_get_account(&account_id).unwrap();
+        U128::from(account.get_balance(&token_id).unwrap())
     }
 }
